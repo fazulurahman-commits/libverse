@@ -1,0 +1,23 @@
+
+{
+  "placeholderImages": [
+    {
+      "id": "hero-library",
+      "description": "A modern and bright library interior",
+      "imageUrl": "https://picsum.photos/seed/lib1/1200/600",
+      "imageHint": "modern library"
+    },
+    {
+      "id": "book-stack",
+      "description": "A neat stack of classic books",
+      "imageUrl": "https://picsum.photos/seed/lib2/600/400",
+      "imageHint": "books stack"
+    },
+    {
+      "id": "member-reading",
+      "description": "A person reading in a cozy corner",
+      "imageUrl": "https://picsum.photos/seed/lib3/600/400",
+      "imageHint": "reading person"
+    }
+  ]
+}
