@@ -1,4 +1,3 @@
-
 {
   "entities": {
     "Member": {
@@ -6,23 +5,144 @@
       "description": "A library member profile",
       "type": "object",
       "properties": {
-        "name": { "type": "string" },
-        "email": { "type": "string", "format": "email" },
-        "member_id": { "type": "string" },
-        "phone": { "type": "string" },
-        "role": { "type": "string", "enum": ["admin", "user"] },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string",
+          "format": "email"
+        },
+        "member_id": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "admin",
+            "user"
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
       },
-      "required": ["name", "email", "member_id", "role"]
+      "required": [
+        "name",
+        "email",
+        "member_id",
+        "role"
+      ]
+    },
+    "Book": {
+      "title": "Book",
+      "description": "A book in the library inventory",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "isbn": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "total_copies": {
+          "type": "number"
+        },
+        "available_copies": {
+          "type": "number"
+        },
+        "location": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "title",
+        "author",
+        "isbn",
+        "total_copies",
+        "available_copies"
+      ]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A book circulation record (issue/return)",
+      "type": "object",
+      "properties": {
+        "book_id": {
+          "type": "string"
+        },
+        "book_title": {
+          "type": "string"
+        },
+        "member_id": {
+          "type": "string"
+        },
+        "member_name": {
+          "type": "string"
+        },
+        "issue_date": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "due_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "return_date": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "issued",
+            "returned"
+          ]
+        },
+        "fine_amount": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "book_id",
+        "member_id",
+        "status",
+        "issue_date",
+        "due_date"
+      ]
     }
   },
   "auth": {
-    "providers": ["google.com", "password"]
+    "providers": [
+      "google.com",
+      "password"
+    ]
   },
   "firestore": {
     "/members/{memberId}": {
       "schema": "Member",
       "description": "Collection of library member profiles"
+    },
+    "/books/{bookId}": {
+      "schema": "Book",
+      "description": "Collection of books in inventory"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Collection of circulation records"
     }
   }
 }

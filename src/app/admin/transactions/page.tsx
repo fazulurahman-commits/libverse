@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState } from 'react';
@@ -15,13 +14,173 @@ import {
   Calendar as CalendarIcon,
   CheckCircle2,
   AlertCircle,
-  Clock
+  Clock,
+  Loader2
 } from 'lucide-react';
-import { MOCK_TRANSACTIONS, MOCK_BOOKS, MOCK_MEMBERS } from '@/lib/firebase-mock';
 import { Badge } from '@/components/ui/badge';
+import { useFirestore, useCollection, useMemoFirebase } from '@/firebase';
+import { collection, query, where, getDocs, addDoc, serverTimestamp, updateDoc, doc, limit, orderBy } from 'firebase/firestore';
+import { errorEmitter } from '@/firebase/error-emitter';
+import { FirestorePermissionError } from '@/firebase/errors';
+import { useToast } from '@/hooks/use-toast';
 
 export default function TransactionsManagement() {
+  const firestore = useFirestore();
+  const { toast } = useToast();
   const [activeTab, setActiveTab] = useState('issue');
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  // Form states for Issuing
+  const [memberId, setMemberId] = useState('');
+  const [bookIsbn, setBookIsbn] = useState('');
+  const [dueDate, setDueDate] = useState(new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]);
+
+  // Form states for Returning
+  const [returnIsbn, setReturnIsbn] = useState('');
+
+  // Fetch recent transactions
+  const transactionsQuery = useMemoFirebase(() => 
+    query(collection(firestore, 'transactions'), orderBy('issue_date', 'desc'), limit(10)),
+    [firestore]
+  );
+  const { data: transactions, loading: txLoading } = useCollection(transactionsQuery);
+
+  const handleIssueBook = async () => {
+    if (!memberId || !bookIsbn) {
+      toast({ variant: "destructive", title: "Validation Error", description: "Please enter both Member ID and ISBN." });
+      return;
+    }
+
+    setIsProcessing(true);
+    try {
+      // 1. Verify Member exists
+      const memberQuery = query(collection(firestore, 'members'), where('member_id', '==', memberId), limit(1));
+      const memberSnap = await getDocs(memberQuery);
+      if (memberSnap.empty) {
+        throw new Error(`Member with ID ${memberId} not found.`);
+      }
+      const memberData = memberSnap.docs[0].data();
+      const memberRefId = memberSnap.docs[0].id;
+
+      // 2. Verify Book exists and has copies
+      const bookQuery = query(collection(firestore, 'books'), where('isbn', '==', bookIsbn), limit(1));
+      const bookSnap = await getDocs(bookQuery);
+      if (bookSnap.empty) {
+        throw new Error(`Book with ISBN ${bookIsbn} not found.`);
+      }
+      const bookData = bookSnap.docs[0].data();
+      const bookRefId = bookSnap.docs[0].id;
+
+      if (bookData.available_copies <= 0) {
+        throw new Error("No available copies of this book currently.");
+      }
+
+      // 3. Create Transaction
+      const txData = {
+        book_id: bookRefId,
+        book_title: bookData.title,
+        member_id: memberRefId,
+        member_name: memberData.name,
+        issue_date: serverTimestamp(),
+        due_date: dueDate,
+        status: 'issued',
+        fine_amount: 0
+      };
+
+      addDoc(collection(firestore, 'transactions'), txData).catch(err => {
+         const permissionError = new FirestorePermissionError({
+          path: 'transactions',
+          operation: 'create',
+          requestResourceData: txData,
+        });
+        errorEmitter.emit('permission-error', permissionError);
+      });
+
+      // 4. Update Book stock
+      const bookDocRef = doc(firestore, 'books', bookRefId);
+      updateDoc(bookDocRef, {
+        available_copies: bookData.available_copies - 1
+      }).catch(err => {
+        const permissionError = new FirestorePermissionError({
+          path: bookDocRef.path,
+          operation: 'update',
+          requestResourceData: { available_copies: bookData.available_copies - 1 },
+        });
+        errorEmitter.emit('permission-error', permissionError);
+      });
+
+      toast({ title: "Success", description: `Book "${bookData.title}" issued to ${memberData.name}.` });
+      setMemberId('');
+      setBookIsbn('');
+    } catch (err: any) {
+      toast({ variant: "destructive", title: "Transaction Failed", description: err.message });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleReturnBook = async () => {
+    if (!returnIsbn) {
+      toast({ variant: "destructive", title: "Validation Error", description: "Please enter a book ISBN to return." });
+      return;
+    }
+
+    setIsProcessing(true);
+    try {
+      // 1. Find the book
+      const bookQuery = query(collection(firestore, 'books'), where('isbn', '==', returnIsbn), limit(1));
+      const bookSnap = await getDocs(bookQuery);
+      if (bookSnap.empty) throw new Error("Book not found.");
+      const bookData = bookSnap.docs[0].data();
+      const bookId = bookSnap.docs[0].id;
+
+      // 2. Find the active "issued" transaction for this book
+      const txQuery = query(
+        collection(firestore, 'transactions'), 
+        where('book_id', '==', bookId), 
+        where('status', '==', 'issued'),
+        limit(1)
+      );
+      const txSnap = await getDocs(txQuery);
+      if (txSnap.empty) throw new Error("No active issue record found for this book.");
+      
+      const txId = txSnap.docs[0].id;
+      const txDocRef = doc(firestore, 'transactions', txId);
+
+      // 3. Mark transaction as returned
+      updateDoc(txDocRef, {
+        status: 'returned',
+        return_date: serverTimestamp()
+      }).catch(err => {
+        const permissionError = new FirestorePermissionError({
+          path: txDocRef.path,
+          operation: 'update',
+          requestResourceData: { status: 'returned' },
+        });
+        errorEmitter.emit('permission-error', permissionError);
+      });
+
+      // 4. Increment book availability
+      const bookDocRef = doc(firestore, 'books', bookId);
+      updateDoc(bookDocRef, {
+        available_copies: bookData.available_copies + 1
+      }).catch(err => {
+        const permissionError = new FirestorePermissionError({
+          path: bookDocRef.path,
+          operation: 'update',
+          requestResourceData: { available_copies: bookData.available_copies + 1 },
+        });
+        errorEmitter.emit('permission-error', permissionError);
+      });
+
+      toast({ title: "Success", description: "Book return processed successfully." });
+      setReturnIsbn('');
+    } catch (err: any) {
+      toast({ variant: "destructive", title: "Return Failed", description: err.message });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
   
   return (
     <div className="space-y-6">
@@ -51,24 +210,49 @@ export default function TransactionsManagement() {
                     <Label htmlFor="member-id">Member ID</Label>
                     <div className="relative">
                       <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                      <Input id="member-id" placeholder="LIB-XXX" className="pl-9" />
+                      <Input 
+                        id="member-id" 
+                        placeholder="LIB-XXX" 
+                        className="pl-9" 
+                        value={memberId}
+                        onChange={(e) => setMemberId(e.target.value)}
+                      />
                     </div>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="book-isbn">Book ISBN / Accession No.</Label>
                     <div className="relative">
                       <BookOpen className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                      <Input id="book-isbn" placeholder="ISBN13..." className="pl-9" />
+                      <Input 
+                        id="book-isbn" 
+                        placeholder="ISBN13..." 
+                        className="pl-9" 
+                        value={bookIsbn}
+                        onChange={(e) => setBookIsbn(e.target.value)}
+                      />
                     </div>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="due-date">Due Date</Label>
                     <div className="relative">
                       <CalendarIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                      <Input id="due-date" type="date" className="pl-9" defaultValue={new Date(Date.now() + 14*24*60*60*1000).toISOString().split('T')[0]} />
+                      <Input 
+                        id="due-date" 
+                        type="date" 
+                        className="pl-9" 
+                        value={dueDate}
+                        onChange={(e) => setDueDate(e.target.value)}
+                      />
                     </div>
                   </div>
-                  <Button className="w-full mt-4 bg-primary hover:bg-primary/90">Confirm Issue</Button>
+                  <Button 
+                    className="w-full mt-4 bg-primary hover:bg-primary/90"
+                    disabled={isProcessing}
+                    onClick={handleIssueBook}
+                  >
+                    {isProcessing ? <Loader2 className="animate-spin h-4 w-4 mr-2" /> : null}
+                    Confirm Issue
+                  </Button>
                 </TabsContent>
 
                 <TabsContent value="return" className="space-y-4">
@@ -76,24 +260,23 @@ export default function TransactionsManagement() {
                     <Label htmlFor="return-isbn">Book ISBN / Accession No.</Label>
                     <div className="relative">
                       <BookOpen className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                      <Input id="return-isbn" placeholder="Scan or Enter ID" className="pl-9" />
+                      <Input 
+                        id="return-isbn" 
+                        placeholder="Scan or Enter ISBN" 
+                        className="pl-9" 
+                        value={returnIsbn}
+                        onChange={(e) => setReturnIsbn(e.target.value)}
+                      />
                     </div>
                   </div>
-                  <div className="p-4 bg-secondary/30 rounded-lg text-sm space-y-2">
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Borrowed By:</span>
-                      <span className="font-bold">John Doe</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Due Date:</span>
-                      <span className="font-bold">Oct 15, 2023</span>
-                    </div>
-                    <div className="flex justify-between items-center pt-2 border-t mt-2">
-                      <span className="text-destructive font-bold">Late Fine:</span>
-                      <span className="text-destructive font-black text-lg">$2.00</span>
-                    </div>
-                  </div>
-                  <Button className="w-full mt-4 variant-accent">Process Return</Button>
+                  <Button 
+                    className="w-full mt-4 bg-accent hover:bg-accent/90 text-accent-foreground"
+                    disabled={isProcessing}
+                    onClick={handleReturnBook}
+                  >
+                    {isProcessing ? <Loader2 className="animate-spin h-4 w-4 mr-2" /> : null}
+                    Process Return
+                  </Button>
                 </TabsContent>
               </Tabs>
             </CardContent>
@@ -114,31 +297,34 @@ export default function TransactionsManagement() {
              </CardHeader>
              <CardContent className="p-0">
                <div className="divide-y">
-                 {MOCK_TRANSACTIONS.map(tx => {
-                    const book = MOCK_BOOKS.find(b => b.id === tx.book_id);
-                    const member = MOCK_MEMBERS.find(m => m.id === tx.member_id);
-                    return (
+                 {txLoading ? (
+                   <div className="p-8 text-center text-muted-foreground flex items-center justify-center">
+                     <Loader2 className="animate-spin mr-2" /> Loading activity...
+                   </div>
+                 ) : transactions.length === 0 ? (
+                   <div className="p-8 text-center text-muted-foreground">No recent activity.</div>
+                 ) : (
+                   transactions.map(tx => (
                       <div key={tx.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-secondary/5 transition-colors">
                         <div className="flex gap-4">
                            <div className={`h-12 w-12 rounded-xl flex items-center justify-center shrink-0 ${tx.status === 'issued' ? 'bg-orange-500/10 text-orange-500' : 'bg-accent/10 text-accent'}`}>
                               {tx.status === 'issued' ? <Clock size={24} /> : <CheckCircle2 size={24} />}
                            </div>
                            <div>
-                              <p className="font-bold text-sm leading-none mb-1">{book?.title}</p>
-                              <p className="text-xs text-muted-foreground">Issued to <span className="font-medium text-primary">{member?.name}</span> ({member?.member_id})</p>
+                              <p className="font-bold text-sm leading-none mb-1">{tx.book_title}</p>
+                              <p className="text-xs text-muted-foreground">Issued to <span className="font-medium text-primary">{tx.member_name}</span></p>
                               <div className="flex items-center gap-2 mt-2">
                                 <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-tighter">Due: {tx.due_date}</span>
-                                {tx.fine_amount > 0 && <Badge variant="destructive" className="h-5 px-1.5 text-[9px]">Fine: ${tx.fine_amount.toFixed(2)}</Badge>}
+                                {tx.fine_amount > 0 && <Badge variant="destructive" className="h-5 px-1.5 text-[9px]">Fine: ₹{tx.fine_amount.toFixed(2)}</Badge>}
                               </div>
                            </div>
                         </div>
                         <div className="flex items-center gap-3 self-end sm:self-center">
                            <Badge variant={tx.status === 'issued' ? 'secondary' : 'outline'} className="capitalize">{tx.status}</Badge>
-                           <Button variant="ghost" size="sm">Details</Button>
                         </div>
                       </div>
-                    );
-                 })}
+                    ))
+                 )}
                </div>
              </CardContent>
            </Card>
@@ -150,7 +336,7 @@ export default function TransactionsManagement() {
                       <AlertCircle size={20} />
                       <span>Overdue Summary</span>
                    </div>
-                   <div className="text-4xl font-black text-destructive">14</div>
+                   <div className="text-4xl font-black text-destructive">0</div>
                    <p className="text-sm text-muted-foreground mt-2">Books currently past their due dates.</p>
                 </CardContent>
              </Card>
@@ -160,8 +346,8 @@ export default function TransactionsManagement() {
                       <CheckCircle2 size={20} className="text-accent" />
                       <span>Returns Today</span>
                    </div>
-                   <div className="text-4xl font-black text-accent-foreground">8</div>
-                   <p className="text-sm text-muted-foreground mt-2">Successful book returns processed since 8 AM.</p>
+                   <div className="text-4xl font-black text-accent-foreground">0</div>
+                   <p className="text-sm text-muted-foreground mt-2">Successful book returns processed recently.</p>
                 </CardContent>
              </Card>
            </div>
